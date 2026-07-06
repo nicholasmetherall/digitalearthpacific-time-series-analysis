@@ -280,6 +280,16 @@ def do_prediction(ds, model, output_name: str | None = None):
 
     # Reshape back to the original 2D array
     array = predicted.reshape(ds.y.size, ds.x.size)
+    
+    # ✨ NEW: Ensure numeric dtype for rasterio compatibility
+    # If predictions are strings/objects, convert to numeric codes
+    if array.dtype == object or array.dtype.kind in ['U', 'S', 'O']:
+        # For categorical predictions, map to integer codes
+        unique_classes = np.unique(array)
+        array_int = np.zeros_like(array, dtype=np.int16)
+        for i, cls in enumerate(unique_classes):
+            array_int[array == cls] = i + 1
+        array = array_int
 
     # Convert to an xarray again, because it's easier to work with
     predicted_da = xr.DataArray(array, coords={"y": ds.y, "x": ds.x}, dims=["y", "x"])
@@ -292,3 +302,49 @@ def do_prediction(ds, model, output_name: str | None = None):
         return predicted_da
     else:
         return predicted_da.to_dataset(name=output_name)
+
+def process_year(year, bbox, client, model, version="nm-tongatapu"):
+    """
+    Process a single year through the complete LULC classification pipeline.
+    
+    Parameters:
+    - year (int or str): Year to process (e.g., 2023 or "2023")
+    - bbox (list): Bounding box [min_lon, min_lat, max_lon, max_lat]
+    - client (pystac.client.Client): STAC client for data search
+    - model: Trained classification model
+    - version (str): Version string for output naming
+    
+    Returns:
+    - xr.DataArray: Classified LULC predictions with spatial coordinates
+    """
+    # Search STAC for Sentinel-2 GeoMAD data
+    items = client.search(
+        collections=["dep_s2_geomad"],
+        datetime=str(year),
+        bbox=bbox
+    ).item_collection()
+    
+    if len(items) == 0:
+        print(f"⚠️  No data found for {year}")
+        return None
+    
+    print(f"✓ Found {len(items)} items for {year}")
+    
+    # Load raw data
+    data = load_data(items, None, bbox)
+    
+    # Scale reflectance values
+    scaled = scale(data).compute().squeeze()
+    
+    # Calculate spectral indices
+    scaled = calculate_band_indices(scaled)
+    
+    # Apply masks (water, urban)
+    masked_scaled, mask = all_masks(scaled, return_mask=True)
+    
+    # Run classification
+    predictions = do_prediction(masked_scaled, model)
+    
+    print(f"✓ Classification complete for {year}")
+    
+    return predictions, mask
