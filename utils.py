@@ -4,27 +4,12 @@ import xarray as xr
 from xarray import DataArray, Dataset
 import numpy as np
 from odc.algo import mask_cleanup
-from skimage.feature import graycomatrix, graycoprops
-from skimage import data
-from skimage.util import view_as_windows
-from shapely import box
-from datetime import datetime
-from shapely.geometry import Polygon
-from pyproj import CRS 
-import folium
-import geopandas as gpd
-import pandas as pd
-import rasterio as rio
-import rioxarray
-from ipyleaflet import basemaps
-from numpy.lib.stride_tricks import sliding_window_view
-import pystac_client
-import planetary_computer
-from odc.stac import load
 from pystac.client import Client
-from skimage.feature import graycomatrix, graycoprops
 
-def load_data(items, bands, bbox):
+from odc.geo import GeoBox
+
+
+def load_data(items, bands=None, bbox=None):
     """
     Load data into a dataset with specified measurements and configurations.
 
@@ -37,7 +22,7 @@ def load_data(items, bands, bbox):
     """
     data = load(
         items,
-        bands=[
+        bands=bands or [
             "nir",
             "red",
             "blue",
@@ -62,9 +47,6 @@ def load_data(items, bands, bbox):
     )
     return data
 
-from odc.geo import GeoBox
-from odc.stac import load
-from pystac_client import Client
 
 catalog = "https://earth-search.aws.element84.com/v1/"
 client = Client.open(catalog)
@@ -126,8 +108,8 @@ def calculate_band_indices(data):
     C_B6 = 0.1379    # RedEdge 2
     C_B7 = -0.0001   # RedEdge 3
     C_B8 = -0.0807   # NIR (Wide)
-    C_B9 = -0.0302   # Water Vapour
-    C_B10 = 0.0003   # SWIR - Cirrus
+    # C_B9 = -0.0302   # Water Vapour
+    # C_B10 = 0.0003   # SWIR - Cirrus
     C_B11 = -0.4064  # SWIR1 (your 'swir16')
     C_B12 = -0.5602  # SWIR2 (your 'swir22')
     C_B8A = -0.1389  # NIR (Narrow)
@@ -262,7 +244,6 @@ def do_prediction(ds, model, output_name: str | None = None):
     Returns:
         Dataset: Dataset with the prediction as a new variable
     """
-    mask = ds.red.isnull()  # Probably should check more bands
 
     # Convert to a stacked array of observations
     stacked_arrays = ds.to_array().stack(dims=["y", "x"])
@@ -303,48 +284,51 @@ def do_prediction(ds, model, output_name: str | None = None):
     else:
         return predicted_da.to_dataset(name=output_name)
 
-def process_year(year, bbox, client, model, version="nm-tongatapu"):
+
+def process_year(year, bbox, model, version="nm-tongatapu"):
     """
     Process a single year through the complete LULC classification pipeline.
     
     Parameters:
     - year (int or str): Year to process (e.g., 2023 or "2023")
     - bbox (list): Bounding box [min_lon, min_lat, max_lon, max_lat]
-    - client (pystac.client.Client): STAC client for data search
     - model: Trained classification model
     - version (str): Version string for output naming
     
     Returns:
     - xr.DataArray: Classified LULC predictions with spatial coordinates
     """
+
+    client = Client.open("https://stac.digitalearthpacific.org")
+
     # Search STAC for Sentinel-2 GeoMAD data
     items = client.search(
         collections=["dep_s2_geomad"],
         datetime=str(year),
         bbox=bbox
     ).item_collection()
-    
+
     if len(items) == 0:
         print(f"⚠️  No data found for {year}")
         return None
-    
+
     print(f"✓ Found {len(items)} items for {year}")
-    
+
     # Load raw data
-    data = load_data(items, None, bbox)
-    
+    data = load_data(items, bbox=bbox)
+
     # Scale reflectance values
     scaled = scale(data).compute().squeeze()
-    
+
     # Calculate spectral indices
     scaled = calculate_band_indices(scaled)
-    
+
     # Apply masks (water, urban)
     masked_scaled, mask = all_masks(scaled, return_mask=True)
-    
+
     # Run classification
     predictions = do_prediction(masked_scaled, model)
-    
+
     print(f"✓ Classification complete for {year}")
-    
+
     return predictions, mask
